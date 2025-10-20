@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>聊天记录查看器（纯文本内容版）</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .chat-right { @apply bg-green-500 text-white rounded-lg rounded-tr-none p-3 max-w-[70%] ml-auto; }
+            .chat-left { @apply bg-gray-200 text-gray-800 rounded-lg rounded-tl-none p-3 max-w-[70%] mr-auto; }
+            .scroll-hide {
+                scrollbar-width: none;
+                -ms-overflow-style: none;
+            }
+            .scroll-hide::-webkit-scrollbar { display: none; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 h-screen flex flex-col overflow-hidden">
+    <header class="bg-gray-800 text-white p-4 flex items-center justify-between">
+        <h1 class="text-xl font-bold">聊天记录查看器</h1>
+        <div>
+            <input type="file" id="fileUpload" accept=".xlsx, .xls, .csv" class="hidden" />
+            <button onclick="document.getElementById('fileUpload').click()" 
+                    class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded flex items-center">
+                <i class="fa fa-upload mr-2"></i>上传文件（Excel/CSV）
+            </button>
+        </div>
+    </header>
+
+    <div class="flex flex-1 overflow-hidden">
+        <div id="receiverList" class="w-80 bg-white border-r border-gray-200 overflow-y-auto scroll-hide hidden">
+            <div class="p-3 border-b">
+                <div class="relative">
+                    <i class="fa fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+                    <input type="text" id="searchReceiver" placeholder="搜索接收者..." 
+                           class="w-full pl-10 pr-4 py-2 rounded-full bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+            </div>
+            <div id="receiverItems" class="divide-y"></div>
+        </div>
+
+        <div id="chatWindow" class="flex-1 flex flex-col bg-gray-50 hidden">
+            <div class="bg-white border-b border-gray-200 p-4 flex items-center">
+                <h2 id="currentReceiverName" class="font-medium text-lg"></h2>
+            </div>
+            <div id="messageContainer" class="flex-1 p-4 overflow-y-auto scroll-hide space-y-4"></div>
+            <div class="bg-white border-t border-gray-200 p-4 text-center text-gray-500 text-sm">
+                聊天记录已加载完毕
+            </div>
+        </div>
+
+        <div id="initialTip" class="flex-1 flex flex-col items-center justify-center text-gray-500">
+            <i class="fa fa-file-text-o text-6xl mb-4 text-blue-500"></i>
+            <p class="text-lg">请上传包含聊天记录的Excel或CSV文件</p>
+        </div>
+    </div>
+
+    <script>
+        let chatData = null;
+
+        // 监听文件上传（支持Excel和CSV）
+        document.getElementById('fileUpload').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const fileExt = file.name.split('.').pop().toLowerCase();
+            if (!['xlsx', 'xls', 'csv'].includes(fileExt)) {
+                alert('请上传Excel（.xlsx/.xls）或CSV（.csv）文件');
+                return;
+            }
+
+            // 根据文件类型选择解析方式
+            if (fileExt === 'csv') {
+                parseCSV(file);
+            } else {
+                parseExcel(file);
+            }
+        });
+
+        // 解析Excel文件
+        function parseExcel(file) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                    processData(jsonData); // 统一数据处理逻辑
+                } catch (err) {
+                    console.error('Excel解析失败：', err);
+                    alert('Excel解析失败，请检查文件格式');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        // 解析CSV文件
+        function parseCSV(file) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const text = e.target.result;
+                    // 按行分割CSV（处理换行符）
+                    const lines = text.split(/\r\n|\n/).filter(line => line.trim() !== '');
+                    // 转换为二维数组格式
+                    const jsonData = lines.map(line => {
+                        const columns = [];
+                        let inQuotes = false;
+                        let currentColumn = '';
+                        for (const char of line) {
+                            if (char === '"') {
+                                inQuotes = !inQuotes;
+                            } else if (char === ',' && !inQuotes) {
+                                columns.push(currentColumn.trim());
+                                currentColumn = '';
+                            } else {
+                                currentColumn += char;
+                            }
+                        }
+                        columns.push(currentColumn.trim());
+                        return columns;
+                    });
+                    processData(jsonData);
+                } catch (err) {
+                    console.error('CSV解析失败：', err);
+                    alert('CSV解析失败，请检查文件格式');
+                }
+            };
+            reader.readAsText(file, 'UTF-8');
+        }
+
+        // 统一处理解析后的数据（核心修改：第三列改为提取双引号内的纯文本）
+        function processData(jsonData) {
+            // 校验数据格式（至少1行有效数据，4列）
+            if (jsonData.length <= 0 || jsonData[0].length < 4) {
+                alert('文件格式错误：需包含4列（发送者uid、接收者uid、双引号包裹的内容、13位时间戳）');
+                return;
+            }
+
+            const messages = [];
+            for (let i = 0; i < jsonData.length; i++) {
+                const row = jsonData[i];
+                // 跳过空行
+                if (!row[0] || !row[1] || !row[2] || !row[3]) continue;
+
+                // 解析发送者、接收者
+                const sender = String(row[0]).trim();
+                const receiver = String(row[1]).trim();
+
+                // 核心修改：提取第三列中双引号包裹的内容
+                let text = '【无法解析的内容】';
+                try {
+                    const contentStr = String(row[2]).trim();
+                    // 匹配双引号包裹的内容（支持内容中包含转义双引号 \"）
+                    const match = contentStr.match(/"((?:\\.|[^"\\])*)"/);
+                    if (match && match[1]) {
+                        // 还原转义的双引号
+                        text = match[1].replace(/\\"/g, '"').trim();
+                    } else {
+                        // 若没有双引号，直接取整列内容
+                        text = contentStr;
+                    }
+                } catch (err) {
+                    console.warn(`第${i+1}行内容解析失败：`, err);
+                    text = `【内容解析错误】`;
+                }
+
+                // 解析13位时间戳为UTC时间
+                let sendTime = '【时间格式错误】';
+                try {
+                    const timestamp = Number(row[3].toString().trim());
+                    if (String(timestamp).length === 13 && !isNaN(timestamp)) {
+                        const date = new Date(timestamp);
+                        sendTime = date.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+                    } else {
+                        sendTime = `【非13位时间戳：${row[3]}】`;
+                    }
+                } catch (err) {
+                    sendTime = `【时间解析失败：${row[3]}】`;
+                }
+
+                messages.push({ sender, receiver, text, time: sendTime });
+            }
+
+            if (messages.length === 0) {
+                alert('文件中无有效聊天记录');
+                return;
+            }
+
+            // 整理数据
+            chatData = {
+                currentUser: messages[0].sender,
+                dialogues: {},
+                receiverList: []
+            };
+
+            // 按接收者分组并排序
+            messages.forEach(msg => {
+                if (!chatData.dialogues[msg.receiver]) chatData.dialogues[msg.receiver] = [];
+                chatData.dialogues[msg.receiver].push(msg);
+                chatData.dialogues[msg.receiver].sort((a, b) => new Date(a.time) - new Date(b.time));
+            });
+
+            // 生成接收者列表
+            chatData.receiverList = Object.keys(chatData.dialogues).map(receiver => {
+                const msgList = chatData.dialogues[receiver];
+                const lastMsg = msgList[msgList.length - 1];
+                return {
+                    uid: receiver,
+                    lastText: lastMsg.text,
+                    lastTime: lastMsg.time,
+                    lastTimeShort: lastMsg.time.split(' ')[1]
+                };
+            }).sort((a, b) => new Date(b.lastTime) - new Date(a.lastTime));
+
+            // 渲染页面
+            renderReceiverList();
+            document.getElementById('receiverList').classList.remove('hidden');
+            document.getElementById('initialTip').classList.add('hidden');
+        }
+
+        // 渲染接收者列表
+        function renderReceiverList(filterKey = '') {
+            const container = document.getElementById('receiverItems');
+            container.innerHTML = '';
+            const filteredReceivers = chatData.receiverList.filter(item => 
+                item.uid.includes(filterKey) || item.lastText.includes(filterKey)
+            );
+            filteredReceivers.forEach(item => {
+                const receiverItem = document.createElement('div');
+                receiverItem.className = 'p-4 hover:bg-gray-100 cursor-pointer flex items-center justify-between';
+                receiverItem.innerHTML = `
+                    <div class="w-56">
+                        <div class="font-medium">${item.uid}</div>
+                        <div class="text-sm text-gray-500 truncate">${item.lastText}</div>
+                    </div>
+                    <div class="text-xs text-gray-400">${item.lastTimeShort}</div>
+                `;
+                receiverItem.onclick = () => renderChatWindow(item.uid);
+                container.appendChild(receiverItem);
+            });
+        }
+
+        // 渲染聊天窗口
+        function renderChatWindow(receiverUid) {
+            const msgList = chatData.dialogues[receiverUid];
+            const container = document.getElementById('messageContainer');
+            document.getElementById('currentReceiverName').textContent = receiverUid;
+            document.getElementById('chatWindow').classList.remove('hidden');
+            container.innerHTML = '';
+
+            msgList.forEach(msg => {
+                const isCurrentUser = msg.sender === chatData.currentUser;
+                const messageEl = document.createElement('div');
+                messageEl.className = 'flex';
+                messageEl.innerHTML = `
+                    <div class="${isCurrentUser ? 'chat-right' : 'chat-left'}">
+                        <div class="text-sm mb-1 ${isCurrentUser ? 'text-right' : ''}">
+                            ${isCurrentUser ? '我' : msg.sender}
+                        </div>
+                        <div>${msg.text}</div>
+                        <div class="text-xs mt-1 text-gray-300 ${isCurrentUser ? 'text-right' : ''}">
+                            ${msg.time}
+                        </div>
+                    </div>
+                `;
+                container.appendChild(messageEl);
+            });
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // 搜索接收者
+        document.getElementById('searchReceiver').addEventListener('input', function(e) {
+            renderReceiverList(e.target.value.trim());
+        });
+    </script>
+</body>
+</html>
